@@ -35,3 +35,6 @@ tags
 *.out
 *.thm
 race.pdf
+# local notes (Claude files, investigation reports)
+CLAUDE*.md
+*-investigation-*.md
