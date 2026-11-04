@@ -779,3 +779,119 @@ void matPowerBCSR(sparsemat *A, int power, densemat *x) {
   }
   DELETE_ARG();
 }
+
+// Block (BCSR) power kernels for any block size, next to the 2x2 prototype
+// above. mat->nrows = node rows, mat->col = block columns, mat->val =
+// row-major B x B blocks, x holds point vectors (B*nrows values per power).
+// One block entry = B*B values + one column index for B*B multiply-adds; the
+// B input values of a block column are loaded once and used for B rows, the
+// B row sums stay in registers (hence B as a template parameter).
+template <int B>
+inline void BLOCK_ROWS(sparsemat *mat, const double *xin, double *xout,
+                       int start, int end) {
+  for (int row = start; row < end; ++row) {
+    double tmp[B];
+#pragma unroll
+    for (int r = 0; r < B; ++r) {
+      tmp[r] = 0;
+    }
+    for (int idx = mat->rowPtr[row]; idx < mat->rowPtr[row + 1]; ++idx) {
+      const double *a = mat->val + (size_t)B * B * idx;
+      const double *xb = xin + (size_t)B * mat->col[idx];
+#pragma unroll
+      for (int r = 0; r < B; ++r) {
+#pragma unroll
+        for (int c = 0; c < B; ++c) {
+          tmp[r] += a[r * B + c] * xb[c];
+        }
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < B; ++r) {
+      xout[(size_t)B * row + r] = tmp[r];
+    }
+  }
+}
+
+// any block size up to 8, B known only at run time
+inline void BLOCK_ROWS_generic(sparsemat *mat, const double *xin, double *xout,
+                               int start, int end) {
+  const int B = mat->block_size;
+  double tmp[8];
+  for (int row = start; row < end; ++row) {
+    for (int r = 0; r < B; ++r) {
+      tmp[r] = 0;
+    }
+    for (int idx = mat->rowPtr[row]; idx < mat->rowPtr[row + 1]; ++idx) {
+      const double *a = mat->val + (size_t)B * B * idx;
+      const double *xb = xin + (size_t)B * mat->col[idx];
+      for (int r = 0; r < B; ++r) {
+        for (int c = 0; c < B; ++c) {
+          tmp[r] += a[r * B + c] * xb[c];
+        }
+      }
+    }
+    for (int r = 0; r < B; ++r) {
+      xout[(size_t)B * row + r] = tmp[r];
+    }
+  }
+}
+
+template <int B>
+inline void MAT_SPMV_KERNEL_BLOCK(int start, int end, int pow, int numa_domain,
+                                  void *args) {
+  DECODE_FROM_VOID(args);
+  const size_t n = (size_t)B * mat->nrows;
+  BLOCK_ROWS<B>(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
+}
+
+inline void MAT_SPMV_KERNEL_BLOCK_generic(int start, int end, int pow,
+                                          int numa_domain, void *args) {
+  DECODE_FROM_VOID(args);
+  const size_t n = (size_t)mat->block_size * mat->nrows;
+  BLOCK_ROWS_generic(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
+}
+
+void matPowerBlock(sparsemat *A, int power, densemat *x) {
+  RACE::Interface *ce = A->ce;
+  ENCODE_TO_VOID(A, NULL, x);
+  int race_power_id;
+  if (A->block_size == 2) {
+    race_power_id =
+        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<2>, voidArg, power);
+  } else if (A->block_size == 3) {
+    race_power_id =
+        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<3>, voidArg, power);
+  } else {
+    race_power_id =
+        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK_generic, voidArg, power);
+  }
+  {
+    ce->executeFunction(race_power_id);
+  }
+  DELETE_ARG();
+}
+
+// plain (not RACE-blocked) block SpMV: x column 0 -> column 1, as plain_spmv
+void plain_spmv_block(sparsemat *mat, densemat *x) {
+  const size_t n = (size_t)mat->block_size * mat->nrows;
+  const double *xin = x->val;
+  double *xout = x->val + n;
+  const int B = mat->block_size;
+  if (B == 2) {
+#pragma omp parallel for schedule(static)
+    for (int row = 0; row < mat->nrows; ++row) {
+      BLOCK_ROWS<2>(mat, xin, xout, row, row + 1);
+    }
+  } else if (B == 3) {
+#pragma omp parallel for schedule(static)
+    for (int row = 0; row < mat->nrows; ++row) {
+      BLOCK_ROWS<3>(mat, xin, xout, row, row + 1);
+    }
+  } else {
+#pragma omp parallel for schedule(static)
+    for (int row = 0; row < mat->nrows; ++row) {
+      BLOCK_ROWS_generic(mat, xin, xout, row, row + 1);
+    }
+  }
+}
