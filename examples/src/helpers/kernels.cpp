@@ -1,6 +1,7 @@
 #include "kernels.h"
 #include "config_eg.h"
 #include <mkl.h>
+#include <cstdlib>
 
 #define SPMV_KERNEL_BODY()                                                     \
   {                                                                            \
@@ -849,14 +850,22 @@ inline void MAT_SPMV_KERNEL_BLOCK_generic(int start, int end, int pow,
   BLOCK_ROWS_generic(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
 }
 
+// MTXPOWER_BLOCK_GENERIC=1: use the run-time-B kernel also for B = 2, 3
+// (templated vs generic comparison)
+static bool forceGenericBlock() {
+  const char *e = getenv("MTXPOWER_BLOCK_GENERIC");
+  return e != NULL && atoi(e) != 0;
+}
+
 void matPowerBlock(sparsemat *A, int power, densemat *x) {
   RACE::Interface *ce = A->ce;
   ENCODE_TO_VOID(A, NULL, x);
   int race_power_id;
-  if (A->block_size == 2) {
+  const bool generic = forceGenericBlock();
+  if (!generic && A->block_size == 2) {
     race_power_id =
         ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<2>, voidArg, power);
-  } else if (A->block_size == 3) {
+  } else if (!generic && A->block_size == 3) {
     race_power_id =
         ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<3>, voidArg, power);
   } else {
@@ -875,12 +884,13 @@ void plain_spmv_block(sparsemat *mat, densemat *x) {
   const double *xin = x->val;
   double *xout = x->val + n;
   const int B = mat->block_size;
-  if (B == 2) {
+  const bool generic = forceGenericBlock();
+  if (!generic && B == 2) {
 #pragma omp parallel for schedule(static)
     for (int row = 0; row < mat->nrows; ++row) {
       BLOCK_ROWS<2>(mat, xin, xout, row, row + 1);
     }
-  } else if (B == 3) {
+  } else if (!generic && B == 3) {
 #pragma omp parallel for schedule(static)
     for (int row = 0; row < mat->nrows; ++row) {
       BLOCK_ROWS<3>(mat, xin, xout, row, row + 1);

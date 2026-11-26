@@ -39,6 +39,9 @@ int main(const int argc, char * argv[])
         b = atoi(bsEnv);
     }
     printf("block size = %d\n", b);
+    const char* genEnv = getenv("MTXPOWER_BLOCK_GENERIC");
+    const bool templated = (b == 2 || b == 3) && !(genEnv && atoi(genEnv) != 0);
+    printf("block kernel = %s\n", templated ? "templated" : "generic");
 
     sparsemat* mat = new sparsemat;
     printf("Reading matrix file\n");
