@@ -39,9 +39,31 @@ int main(const int argc, char * argv[])
         b = atoi(bsEnv);
     }
     printf("block size = %d\n", b);
+    // same mapping as genericBlockVariant() in kernels.cpp
     const char* genEnv = getenv("MTXPOWER_BLOCK_GENERIC");
-    const bool templated = (b == 2 || b == 3) && !(genEnv && atoi(genEnv) != 0);
-    printf("block kernel = %s\n", templated ? "templated" : "generic");
+    int variant = genEnv ? atoi(genEnv) : 0;
+    if(variant < 0 || variant > 4)
+    {
+        variant = 1;
+    }
+    const char* kernelName = "generic";
+    if(variant == 0 && (b == 2 || b == 3))
+    {
+        kernelName = "templated";
+    }
+    else if(variant == 2)
+    {
+        kernelName = "hint";
+    }
+    else if(variant == 3)
+    {
+        kernelName = "scalar";
+    }
+    else if(variant == 4)
+    {
+        kernelName = "dispatch";
+    }
+    printf("block kernel = %s\n", kernelName);
 
     sparsemat* mat = new sparsemat;
     printf("Reading matrix file\n");
