@@ -835,119 +835,6 @@ inline void BLOCK_ROWS_generic(sparsemat *mat, const double *xin, double *xout,
   }
 }
 
-// G2: as BLOCK_ROWS_generic, plus hints that B is small (B still at run time)
-inline void BLOCK_ROWS_hint(sparsemat *mat, const double *xin, double *xout,
-                            int start, int end) {
-  const int B = mat->block_size;
-#if defined(__clang__)
-  __builtin_assume(B >= 1 && B <= 8);
-#endif
-  double tmp[8];
-  for (int row = start; row < end; ++row) {
-#pragma loop_count min(1), max(8), avg(3)
-#pragma unroll
-    for (int r = 0; r < B; ++r) {
-      tmp[r] = 0;
-    }
-    for (int idx = mat->rowPtr[row]; idx < mat->rowPtr[row + 1]; ++idx) {
-      const double *a = mat->val + (size_t)B * B * idx;
-      const double *xb = xin + (size_t)B * mat->col[idx];
-#pragma loop_count min(1), max(8), avg(3)
-#pragma unroll
-      for (int r = 0; r < B; ++r) {
-#pragma loop_count min(1), max(8), avg(3)
-#pragma unroll
-        for (int c = 0; c < B; ++c) {
-          tmp[r] += a[r * B + c] * xb[c];
-        }
-      }
-    }
-#pragma loop_count min(1), max(8), avg(3)
-#pragma unroll
-    for (int r = 0; r < B; ++r) {
-      xout[(size_t)B * row + r] = tmp[r];
-    }
-  }
-}
-
-// G3: one scalar accumulator per block row instead of a tmp array, same
-// summation order as BLOCK_ROWS<B>
-#define BLOCK_ROW_ACC(k)                                                       \
-  if (B > k) {                                                                 \
-    for (int c = 0; c < B; ++c) {                                              \
-      t##k += a[k * B + c] * xb[c];                                            \
-    }                                                                          \
-  }
-#define BLOCK_ROW_OUT(k)                                                       \
-  if (B > k) {                                                                 \
-    xout[(size_t)B * row + k] = t##k;                                          \
-  }
-
-inline void BLOCK_ROWS_scalar(sparsemat *mat, const double *xin, double *xout,
-                              int start, int end) {
-  const int B = mat->block_size;
-  for (int row = start; row < end; ++row) {
-    double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, t6 = 0, t7 = 0;
-    for (int idx = mat->rowPtr[row]; idx < mat->rowPtr[row + 1]; ++idx) {
-      const double *a = mat->val + (size_t)B * B * idx;
-      const double *xb = xin + (size_t)B * mat->col[idx];
-      BLOCK_ROW_ACC(0)
-      BLOCK_ROW_ACC(1)
-      BLOCK_ROW_ACC(2)
-      BLOCK_ROW_ACC(3)
-      BLOCK_ROW_ACC(4)
-      BLOCK_ROW_ACC(5)
-      BLOCK_ROW_ACC(6)
-      BLOCK_ROW_ACC(7)
-    }
-    BLOCK_ROW_OUT(0)
-    BLOCK_ROW_OUT(1)
-    BLOCK_ROW_OUT(2)
-    BLOCK_ROW_OUT(3)
-    BLOCK_ROW_OUT(4)
-    BLOCK_ROW_OUT(5)
-    BLOCK_ROW_OUT(6)
-    BLOCK_ROW_OUT(7)
-  }
-}
-
-#undef BLOCK_ROW_ACC
-#undef BLOCK_ROW_OUT
-
-// G4: B at run time for the caller, one switch per call, compile-time kernels
-inline void BLOCK_ROWS_dispatch(sparsemat *mat, const double *xin, double *xout,
-                                int start, int end) {
-  switch (mat->block_size) {
-  case 1:
-    BLOCK_ROWS<1>(mat, xin, xout, start, end);
-    break;
-  case 2:
-    BLOCK_ROWS<2>(mat, xin, xout, start, end);
-    break;
-  case 3:
-    BLOCK_ROWS<3>(mat, xin, xout, start, end);
-    break;
-  case 4:
-    BLOCK_ROWS<4>(mat, xin, xout, start, end);
-    break;
-  case 5:
-    BLOCK_ROWS<5>(mat, xin, xout, start, end);
-    break;
-  case 6:
-    BLOCK_ROWS<6>(mat, xin, xout, start, end);
-    break;
-  case 7:
-    BLOCK_ROWS<7>(mat, xin, xout, start, end);
-    break;
-  case 8:
-    BLOCK_ROWS<8>(mat, xin, xout, start, end);
-    break;
-  default:
-    BLOCK_ROWS_generic(mat, xin, xout, start, end);
-    break;
-  }
-}
-
 template <int B>
 inline void MAT_SPMV_KERNEL_BLOCK(int start, int end, int pow, int numa_domain,
                                   void *args) {
@@ -963,56 +850,24 @@ inline void MAT_SPMV_KERNEL_BLOCK_generic(int start, int end, int pow,
   BLOCK_ROWS_generic(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
 }
 
-inline void MAT_SPMV_KERNEL_BLOCK_hint(int start, int end, int pow,
-                                       int numa_domain, void *args) {
-  DECODE_FROM_VOID(args);
-  const size_t n = (size_t)mat->block_size * mat->nrows;
-  BLOCK_ROWS_hint(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
-}
-
-inline void MAT_SPMV_KERNEL_BLOCK_scalar(int start, int end, int pow,
-                                         int numa_domain, void *args) {
-  DECODE_FROM_VOID(args);
-  const size_t n = (size_t)mat->block_size * mat->nrows;
-  BLOCK_ROWS_scalar(mat, x->val + (pow - 1) * n, x->val + pow * n, start, end);
-}
-
-inline void MAT_SPMV_KERNEL_BLOCK_dispatch(int start, int end, int pow,
-                                           int numa_domain, void *args) {
-  DECODE_FROM_VOID(args);
-  const size_t n = (size_t)mat->block_size * mat->nrows;
-  BLOCK_ROWS_dispatch(mat, x->val + (pow - 1) * n, x->val + pow * n, start,
-                      end);
-}
-
-// MTXPOWER_BLOCK_GENERIC (comparison only): 0 / unset = templated for B = 2, 3
-// (generic otherwise), 1 = generic, 2 = hint, 3 = scalar, 4 = dispatch
-static int genericBlockVariant() {
+// MTXPOWER_BLOCK_GENERIC=1: use the run-time-B kernel also for B = 2, 3
+// (templated vs generic comparison)
+static bool forceGenericBlock() {
   const char *e = getenv("MTXPOWER_BLOCK_GENERIC");
-  const int v = (e != NULL) ? atoi(e) : 0;
-  return (v < 0 || v > 4) ? 1 : v;
+  return e != NULL && atoi(e) != 0;
 }
 
 void matPowerBlock(sparsemat *A, int power, densemat *x) {
   RACE::Interface *ce = A->ce;
   ENCODE_TO_VOID(A, NULL, x);
   int race_power_id;
-  const int variant = genericBlockVariant();
-  if (variant == 0 && A->block_size == 2) {
+  const bool generic = forceGenericBlock();
+  if (!generic && A->block_size == 2) {
     race_power_id =
         ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<2>, voidArg, power);
-  } else if (variant == 0 && A->block_size == 3) {
+  } else if (!generic && A->block_size == 3) {
     race_power_id =
         ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK<3>, voidArg, power);
-  } else if (variant == 2) {
-    race_power_id =
-        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK_hint, voidArg, power);
-  } else if (variant == 3) {
-    race_power_id =
-        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK_scalar, voidArg, power);
-  } else if (variant == 4) {
-    race_power_id =
-        ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK_dispatch, voidArg, power);
   } else {
     race_power_id =
         ce->registerFunction(&MAT_SPMV_KERNEL_BLOCK_generic, voidArg, power);
@@ -1029,31 +884,16 @@ void plain_spmv_block(sparsemat *mat, densemat *x) {
   const double *xin = x->val;
   double *xout = x->val + n;
   const int B = mat->block_size;
-  const int variant = genericBlockVariant();
-  if (variant == 0 && B == 2) {
+  const bool generic = forceGenericBlock();
+  if (!generic && B == 2) {
 #pragma omp parallel for schedule(static)
     for (int row = 0; row < mat->nrows; ++row) {
       BLOCK_ROWS<2>(mat, xin, xout, row, row + 1);
     }
-  } else if (variant == 0 && B == 3) {
+  } else if (!generic && B == 3) {
 #pragma omp parallel for schedule(static)
     for (int row = 0; row < mat->nrows; ++row) {
       BLOCK_ROWS<3>(mat, xin, xout, row, row + 1);
-    }
-  } else if (variant == 2) {
-#pragma omp parallel for schedule(static)
-    for (int row = 0; row < mat->nrows; ++row) {
-      BLOCK_ROWS_hint(mat, xin, xout, row, row + 1);
-    }
-  } else if (variant == 3) {
-#pragma omp parallel for schedule(static)
-    for (int row = 0; row < mat->nrows; ++row) {
-      BLOCK_ROWS_scalar(mat, xin, xout, row, row + 1);
-    }
-  } else if (variant == 4) {
-#pragma omp parallel for schedule(static)
-    for (int row = 0; row < mat->nrows; ++row) {
-      BLOCK_ROWS_dispatch(mat, xin, xout, row, row + 1);
     }
   } else {
 #pragma omp parallel for schedule(static)
